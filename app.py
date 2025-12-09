@@ -90,7 +90,9 @@ if uploaded_file:
         def categorize_defect(val):
             s = str(val).upper()
             if pd.isna(val) or val == "" or s == 'NAN': return "Blank"
+            # Logic: If it contains words like 'No', 'Safe', or symbols like '/', it is NO DEFECT.
             if any(x in s for x in ['NO DEFECT', 'TIADA', '/', 'SAFE', 'OK', 'GOOD']): return "No"
+            # Logic: If it contains 'Major', 'Minor', 'Notice', or 'X', it is a YES (Defect Found).
             if any(x in s for x in ['MAJOR', 'MINOR', 'NOTICE', 'X', 'YES', 'ADA', 'FAIL']): return "Yes"
             return "Other" # For unclear text
 
@@ -121,5 +123,56 @@ if uploaded_file:
             df = df[df['Defect Found?'].isin(f_yn)]
 
         # B. Filter: Specific Category (Major/Minor)
-        # We perform a robust check for these keywords
-        status_types = ["Major", "Minor",
+        status_types = ["Major", "Minor", "Notice", "No Defect"]
+        f_cat = st.sidebar.multiselect("Inspection Category", options=status_types)
+        if f_cat:
+            # Filter logic using string matching
+            mask = pd.Series([False] * len(df))
+            for cat in f_cat:
+                mask = mask | df[c_status].astype(str).str.contains(cat, case=False, na=False)
+            df = df[mask]
+
+        # C. Filter: Inspector
+        f_insp = st.sidebar.multiselect("Inspector Name", options=df[c_insp].astype(str).unique())
+        if f_insp:
+            df = df[df[c_insp].astype(str).isin(f_insp)]
+            
+        # D. Filter: Reply Date (Yes/No)
+        f_reply = st.sidebar.radio("Reply Status:", ["All", "Replied", "Not Replied"])
+        if f_reply == "Replied":
+            df = df[df[c_reply].notna()]
+        elif f_reply == "Not Replied":
+            df = df[df[c_reply].isna()]
+
+        # E. Filter: Buffer Time
+        f_buffer = st.sidebar.select_slider("Deadline Buffer:", options=["All", "Overdue", "1 Month", "3 Months"])
+        
+        if f_buffer == "Overdue":
+            df = df[df['Days Left'] < 0]
+        elif f_buffer == "1 Month":
+            df = df[(df['Days Left'] >= 0) & (df['Days Left'] <= 30)]
+        elif f_buffer == "3 Months":
+            df = df[(df['Days Left'] >= 0) & (df['Days Left'] <= 90)]
+
+        # 4. MAIN DISPLAY
+        # Metrics
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Filtered Rows", len(df))
+        m2.metric("Defects (Yes)", len(df[df['Defect Found?'] == "Yes"]))
+        m3.metric("Urgent (Overdue)", len(df[df['Days Left'] < 0]), delta_color="inverse")
+
+        # Table with Color
+        def style_rows(row):
+            d = row['Days Left']
+            # Red for Overdue
+            if pd.notnull(d) and d < 0: return ['background-color: #ffcccc'] * len(row)
+            # Yellow for Due Soon (30 days)
+            if pd.notnull(d) and d < 30: return ['background-color: #ffffcc'] * len(row)
+            return [''] * len(row)
+
+        # Show relevant columns
+        show_cols = [c_date, c_status, 'Defect Found?', 'Due Date', 'Days Left', c_reply, c_insp]
+        st.dataframe(df[show_cols].style.apply(style_rows, axis=1), use_container_width=True)
+
+        # Download
+        st.download_button("📥 Download Filtered Data", df.to_csv(index=False), "filtered_jkkp_data.csv", "text/csv")
