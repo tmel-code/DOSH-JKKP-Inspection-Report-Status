@@ -10,9 +10,8 @@ st.title("🛡️ JKKP Inspection & Defect Tracker")
 # --- INSTRUCTIONS ---
 with st.expander("ℹ️ Help / Instructions"):
     st.markdown("""
-    * **Upload:** Supports **.xlsx** (Excel) and **.csv**.
+    * **Target Column:** This app now strictly looks for **"ANNUAL INSPECTION"** and ignores "1st Schedule".
     * **Fix for Errors:** If Excel upload fails, save your file as **CSV** and upload that.
-    * **Filters:** The app automatically creates a "Yes/No" filter based on the Status column.
     """)
 
 # --- 1. FILE UPLOAD ---
@@ -24,11 +23,13 @@ if uploaded_file:
         # --- A. FILE READING (Robust Mode) ---
         # 1. Try Loading as CSV
         if uploaded_file.name.lower().endswith('.csv'):
+            # Read first 15 rows to find the specific header "ANNUAL INSPECTION DATE"
             preview = pd.read_csv(uploaded_file, header=None, nrows=15)
             header_row = 0
             for i, row in preview.iterrows():
                 row_str = row.astype(str).str.upper().tolist()
-                if any("ANNUAL" in x for x in row_str) or any("TARIKH" in x for x in row_str):
+                # We prioritize finding "ANNUAL" to ensure we get the right row
+                if any("ANNUAL" in x for x in row_str) and any("INSPECTION" in x for x in row_str):
                     header_row = i
                     break
             uploaded_file.seek(0)
@@ -42,7 +43,7 @@ if uploaded_file:
                 header_row = 4  # Default guess
                 for i, row in preview.iterrows():
                     row_str = row.astype(str).str.upper().tolist()
-                    if any("ANNUAL" in x for x in row_str) or any("TARIKH" in x for x in row_str):
+                    if any("ANNUAL" in x for x in row_str) and any("INSPECTION" in x for x in row_str):
                         header_row = i
                         break
                 
@@ -66,17 +67,30 @@ if uploaded_file:
     if df is not None:
         st.sidebar.success("File Loaded!")
 
-        # 1. MAP COLUMNS
+        # 1. MAP COLUMNS (UPDATED LOGIC)
         st.sidebar.header("1. Map Columns")
         cols = list(df.columns)
         
-        def find_col(terms):
+        # New Helper: Find column but EXCLUDE specific terms (like "1st Schedule")
+        def find_col(terms, exclude_terms=None):
+            if exclude_terms is None: exclude_terms = []
             for i, c in enumerate(cols):
-                if any(t in str(c).upper() for t in terms): return i
+                c_upper = str(c).upper()
+                # Skip if it contains an excluded term
+                if any(ex in c_upper for ex in exclude_terms):
+                    continue
+                # Check if it matches search terms
+                if any(t in c_upper for t in terms):
+                    return i
             return 0
 
-        # Selectors
-        c_date = st.sidebar.selectbox("Inspection Date", cols, index=find_col(['ANNUAL', 'TARIKH', 'INSPECTION']))
+        # Selectors with strict exclusion for 1st Schedule
+        c_date = st.sidebar.selectbox(
+            "Annual Inspection Date", 
+            cols, 
+            index=find_col(['ANNUAL', 'TARIKH PEMERIKSAAN'], exclude_terms=['1ST SCHEDULE', 'JADUAL PERTAMA'])
+        )
+        
         c_status = st.sidebar.selectbox("Inspection Status", cols, index=find_col(['DEFECTS STATUS', 'STATUS', 'KEADAAN']))
         c_reply = st.sidebar.selectbox("Reply Date", cols, index=find_col(['REPLY', 'BALAS']))
         c_insp = st.sidebar.selectbox("Inspector / CP", cols, index=find_col(['INSPECTOR', 'PEMERIKSA']))
@@ -86,15 +100,13 @@ if uploaded_file:
         for c in [c_date, c_reply]:
             df[c] = pd.to_datetime(df[c], errors='coerce').dt.date
 
-        # --- NEW: GENERATE 'YES/NO' COLUMN ---
+        # --- GENERATE 'YES/NO' COLUMN ---
         def categorize_defect(val):
             s = str(val).upper()
             if pd.isna(val) or val == "" or s == 'NAN': return "Blank"
-            # Logic: If it contains words like 'No', 'Safe', or symbols like '/', it is NO DEFECT.
             if any(x in s for x in ['NO DEFECT', 'TIADA', '/', 'SAFE', 'OK', 'GOOD']): return "No"
-            # Logic: If it contains 'Major', 'Minor', 'Notice', or 'X', it is a YES (Defect Found).
             if any(x in s for x in ['MAJOR', 'MINOR', 'NOTICE', 'X', 'YES', 'ADA', 'FAIL']): return "Yes"
-            return "Other" # For unclear text
+            return "Other" 
 
         df['Defect Found?'] = df[c_status].apply(categorize_defect)
 
@@ -117,7 +129,7 @@ if uploaded_file:
         st.sidebar.markdown("---")
         st.sidebar.header("2. Filters")
 
-        # A. Filter: Defect Yes/No (The one you asked for!)
+        # A. Filter: Defect Yes/No
         f_yn = st.sidebar.multiselect("Defect Found? (Yes/No)", options=["Yes", "No", "Blank", "Other"])
         if f_yn:
             df = df[df['Defect Found?'].isin(f_yn)]
@@ -126,7 +138,6 @@ if uploaded_file:
         status_types = ["Major", "Minor", "Notice", "No Defect"]
         f_cat = st.sidebar.multiselect("Inspection Category", options=status_types)
         if f_cat:
-            # Filter logic using string matching
             mask = pd.Series([False] * len(df))
             for cat in f_cat:
                 mask = mask | df[c_status].astype(str).str.contains(cat, case=False, na=False)
@@ -164,15 +175,11 @@ if uploaded_file:
         # Table with Color
         def style_rows(row):
             d = row['Days Left']
-            # Red for Overdue
-            if pd.notnull(d) and d < 0: return ['background-color: #ffcccc'] * len(row)
-            # Yellow for Due Soon (30 days)
-            if pd.notnull(d) and d < 30: return ['background-color: #ffffcc'] * len(row)
+            if pd.notnull(d) and d < 0: return ['background-color: #ffcccc'] * len(row) # Red
+            if pd.notnull(d) and d < 30: return ['background-color: #ffffcc'] * len(row) # Yellow
             return [''] * len(row)
 
-        # Show relevant columns
         show_cols = [c_date, c_status, 'Defect Found?', 'Due Date', 'Days Left', c_reply, c_insp]
         st.dataframe(df[show_cols].style.apply(style_rows, axis=1), use_container_width=True)
 
-        # Download
         st.download_button("📥 Download Filtered Data", df.to_csv(index=False), "filtered_jkkp_data.csv", "text/csv")
