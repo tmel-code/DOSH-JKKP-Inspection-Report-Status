@@ -2,159 +2,128 @@ import streamlit as st
 import pandas as pd
 from datetime import date
 from dateutil.relativedelta import relativedelta
+import sys
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="JKKP Inspection Tracker", layout="wide", page_icon="🛡️")
-
-# --- CUSTOM STYLING ---
-st.markdown("""
-    <style>
-        .stDataFrame { border: 1px solid #ccc; border-radius: 5px; }
-        .urgent { color: #d9534f; font-weight: bold; }
-        .safe { color: #5cb85c; font-weight: bold; }
-    </style>
-""", unsafe_allow_html=True)
-
+st.set_page_config(page_title="JKKP Inspection Tracker", layout="wide")
 st.title("🛡️ JKKP Inspection & Defect Tracker")
-st.markdown("Upload your **Master File**. The app acts as a dashboard to track deadlines.")
+
+# --- SAFETY CHECK FOR OPENPYXL ---
+try:
+    import openpyxl
+except ImportError:
+    st.error("🔴 CRITICAL ERROR: 'openpyxl' is missing.")
+    st.code("pip install openpyxl", language="bash")
+    st.stop()
 
 # --- 1. FILE UPLOAD ---
-uploaded_file = st.file_uploader("Upload Excel File", type=['xlsx', 'xls'])
+uploaded_file = st.file_uploader("Upload Excel File (.xlsx)", type=['xlsx', 'xls'])
 
 if uploaded_file is not None:
     try:
         # --- SMART HEADER DETECTION ---
-        # We read the first 10 rows to find the row containing "ANNUAL INSPECTION DATE"
-        # engine='openpyxl' is crucial here to fix your error
+        # Read first 10 rows to find the header row containing "ANNUAL INSPECTION" or "TARIKH"
+        # We use engine='openpyxl' explicitly.
         df_preview = pd.read_excel(uploaded_file, header=None, nrows=10, engine='openpyxl')
         
-        header_row_index = 0
-        found_header = False
+        header_row = 4 # Default to Row 5 (Index 4) based on your Master File
         
-        # Scan rows to find the real header
         for i, row in df_preview.iterrows():
             row_text = row.astype(str).str.upper().tolist()
-            # We look for keywords specific to your JKKP report
-            if any("ANNUAL INSPECTION DATE" in x for x in row_text) or any("TARIKH" in x for x in row_text):
-                header_row_index = i
-                found_header = True
+            if any("ANNUAL INSPECTION" in x for x in row_text) or any("TARIKH" in x for x in row_text):
+                header_row = i
                 break
         
-        if not found_header:
-            st.warning("⚠️ Could not auto-detect header row. Defaulting to Row 5.")
-            header_row_index = 4 # Default based on your uploaded file
+        # Reload Data with correct header
+        uploaded_file.seek(0)
+        df = pd.read_excel(uploaded_file, header=header_row, engine='openpyxl')
 
-        # Reload data with the correct header row
-        df = pd.read_excel(uploaded_file, header=header_row_index, engine='openpyxl')
-
-        # --- 2. COLUMN MAPPING (Flexible for Old/New Versions) ---
+        # --- 2. COLUMN MAPPING ---
         st.sidebar.header("🔧 Column Settings")
-        st.sidebar.caption("Map the columns below if they don't match automatically.")
-        
         all_cols = list(df.columns)
-        
-        # Function to find best matching column name
-        def find_col(keywords):
-            for i, col in enumerate(all_cols):
-                c_str = str(col).upper()
-                if any(k in c_str for k in keywords):
+
+        # Helper to auto-find columns
+        def get_col(options, keywords):
+            for i, col in enumerate(options):
+                if any(k in str(col).upper() for k in keywords):
                     return i
             return 0
 
-        # Create dropdowns for mapping
-        c_date = st.sidebar.selectbox("Inspection Date", all_cols, index=find_col(['ANNUAL INSPECTION', 'TARIKH PEMERIKSAAN']))
-        c_status = st.sidebar.selectbox("Defect Status (Major/Minor)", all_cols, index=find_col(['DEFECTS STATUS', 'KEADAAN', 'STATUS']))
-        c_reply = st.sidebar.selectbox("Reply Date", all_cols, index=find_col(['REPLY DATE', 'TARIKH BALAS']))
-        c_inspector = st.sidebar.selectbox("Inspector Name", all_cols, index=find_col(['INSPECTOR', 'NAMA PEMERIKSA', 'CP']))
-        c_defect_yn = st.sidebar.selectbox("Defect (Yes/No)", all_cols, index=find_col(['DEFECT', 'ADA', 'YES']))
+        c_date = st.sidebar.selectbox("Inspection Date", all_cols, index=get_col(all_cols, ['ANNUAL', 'TARIKH', 'INSPECTION']))
+        c_status = st.sidebar.selectbox("Defect Status (Major/Minor)", all_cols, index=get_col(all_cols, ['DEFECTS STATUS', 'STATUS', 'KEADAAN']))
+        c_reply = st.sidebar.selectbox("Reply Date", all_cols, index=get_col(all_cols, ['REPLY', 'BALAS']))
+        c_inspector = st.sidebar.selectbox("Inspector / CP Name", all_cols, index=get_col(all_cols, ['INSPECTOR', 'PEMERIKSA']))
 
-        # --- 3. DATA PROCESSING ---
-        # Convert dates
+        # --- 3. LOGIC & CALCULATIONS ---
+        # 1. Clean Dates
         for col in [c_date, c_reply]:
             df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
 
-        # Logic: Calculate Due Date based on Status
-        def calculate_due_date(row):
-            start_date = row[c_date]
+        # 2. Calculate Due Date (The Logic)
+        def calculate_deadline(row):
+            start = row[c_date]
             status = str(row[c_status]).upper()
             
-            if pd.isnull(start_date): return None
+            if pd.isnull(start): return None
             
-            if "MAJOR" in status:
-                return start_date + relativedelta(months=1) # 1 Month
-            elif "MINOR" in status:
-                return start_date + relativedelta(months=3) # 3 Months
-            elif "NOTICE" in status:
-                return start_date + relativedelta(weeks=2)  # 2 Weeks
-            elif "NO DEFECT" in status:
-                return start_date + relativedelta(years=1)  # Next Cycle
-            return None
+            if "MAJOR" in status: return start + relativedelta(months=1)
+            if "MINOR" in status: return start + relativedelta(months=3)
+            if "NOTICE" in status: return start + relativedelta(weeks=2)
+            if "NO DEFECT" in status: return start + relativedelta(years=1)
+            return start + relativedelta(years=1) # Default
 
-        df['Due Date'] = df.apply(calculate_due_date, axis=1)
+        df['Due Date'] = df.apply(calculate_deadline, axis=1)
         
-        # Calculate Buffer / Days Remaining
+        # 3. Calculate Buffer
         today = date.today()
         df['Days Remaining'] = (pd.to_datetime(df['Due Date']) - pd.to_datetime(today)).dt.days
 
         # --- 4. FILTERS ---
         st.sidebar.markdown("---")
-        st.sidebar.header("📊 Dashboard Filters")
-
-        # Filter by Inspector
-        unique_inspectors = df[c_inspector].dropna().unique()
-        selected_inspector = st.sidebar.multiselect("Filter Inspector", options=unique_inspectors)
-        if selected_inspector:
-            df = df[df[c_inspector].isin(selected_inspector)]
-
-        # Filter by Urgency (Buffer Time)
-        buffer_mode = st.sidebar.radio("Show Deadlines:", ["All Data", "Due in 1 Month", "Due in 3 Months", "Overdue"])
+        st.sidebar.header("🔍 Filters")
         
-        if buffer_mode == "Due in 1 Month":
+        # Inspector Filter
+        sel_insp = st.sidebar.multiselect("Inspector", options=df[c_inspector].dropna().unique())
+        if sel_insp:
+            df = df[df[c_inspector].isin(sel_insp)]
+
+        # Status Filter
+        sel_stat = st.sidebar.multiselect("Status Category", options=df[c_status].dropna().unique())
+        if sel_stat:
+            df = df[df[c_status].isin(sel_stat)]
+
+        # Buffer Time Filter
+        buffer_mode = st.sidebar.radio("Deadline Buffer:", ["All", "Overdue (Urgent)", "Due in 1 Month", "Due in 3 Months"])
+        
+        if buffer_mode == "Overdue (Urgent)":
+            df = df[df['Days Remaining'] < 0]
+        elif buffer_mode == "Due in 1 Month":
             df = df[(df['Days Remaining'] >= 0) & (df['Days Remaining'] <= 30)]
         elif buffer_mode == "Due in 3 Months":
             df = df[(df['Days Remaining'] >= 0) & (df['Days Remaining'] <= 90)]
-        elif buffer_mode == "Overdue":
-            df = df[df['Days Remaining'] < 0]
 
-        # --- 5. MAIN DISPLAY ---
-        
-        # KPI Row
-        kpi1, kpi2, kpi3 = st.columns(3)
-        kpi1.metric("Total Items", len(df))
-        
-        overdue_count = len(df[df['Days Remaining'] < 0])
-        kpi2.metric("Overdue Items", overdue_count, delta_color="inverse")
-        
-        major_defects = len(df[df[c_status].astype(str).str.contains("MAJOR", case=False, na=False)])
-        kpi3.metric("Major Defects", major_defects)
+        # --- 5. DISPLAY ---
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total Rows", len(df))
+        col2.metric("Major Defects", len(df[df[c_status].astype(str).str.contains("MAJOR", case=False, na=False)]))
+        col3.metric("Action Required", len(df[df['Days Remaining'] < 0]), delta_color="inverse")
 
-        # Highlight Function for DataFrame
-        def highlight_rows(row):
+        # Table Styling
+        def highlight(row):
             days = row['Days Remaining']
-            if pd.isna(days): return [''] * len(row)
-            if days < 0: return ['background-color: #ffcccc'] * len(row) # Red
-            if days <= 30: return ['background-color: #fff3cd'] * len(row) # Yellow
+            if pd.notnull(days):
+                if days < 0: return ['background-color: #ffcccc'] * len(row) # Red
+                if days < 30: return ['background-color: #ffffcc'] * len(row) # Yellow
             return [''] * len(row)
 
-        st.subheader("📋 Inspection Details")
-        
-        # Select columns to display
-        display_cols = [c_date, c_status, 'Due Date', 'Days Remaining', c_reply, c_inspector, c_defect_yn]
-        # Filter out columns that might not exist or were not mapped
-        display_cols = [c for c in display_cols if c in df.columns]
-
         st.dataframe(
-            df[display_cols].style.apply(highlight_rows, axis=1),
-            use_container_width=True,
-            column_config={
-                c_date: st.column_config.DateColumn("Inspection Date"),
-                "Due Date": st.column_config.DateColumn("Due Date", format="DD/MM/YYYY"),
-            }
+            df[[c_date, c_status, 'Due Date', 'Days Remaining', c_reply, c_inspector]].style.apply(highlight, axis=1),
+            use_container_width=True
         )
 
     except Exception as e:
-        st.error(f"Error: {e}")
-        st.info("Ensure you have 'openpyxl' installed and the file is a standard Excel format.")
+        st.error(f"Error Processing File: {e}")
+        st.warning("Please ensure the file is not password protected and is a valid .xlsx file.")
 
 else:
-    st.info("Waiting for file upload...")
+    st.info("Waiting for Excel file upload...")
