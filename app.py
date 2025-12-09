@@ -10,8 +10,9 @@ st.title("🛡️ JKKP Inspection & Defect Tracker")
 # --- INSTRUCTIONS ---
 with st.expander("ℹ️ Help / Instructions"):
     st.markdown("""
-    * **Target Column:** This app now strictly looks for **"ANNUAL INSPECTION"** and ignores "1st Schedule".
+    * **Target Column:** This app looks for **"ANNUAL INSPECTION"** and ignores "1st Schedule".
     * **Fix for Errors:** If Excel upload fails, save your file as **CSV** and upload that.
+    * **Styling:** If the colored rows disappear, it means there was a conflict in your column selection, but the data will still be visible.
     """)
 
 # --- 1. FILE UPLOAD ---
@@ -23,12 +24,11 @@ if uploaded_file:
         # --- A. FILE READING (Robust Mode) ---
         # 1. Try Loading as CSV
         if uploaded_file.name.lower().endswith('.csv'):
-            # Read first 15 rows to find the specific header "ANNUAL INSPECTION DATE"
             preview = pd.read_csv(uploaded_file, header=None, nrows=15)
             header_row = 0
             for i, row in preview.iterrows():
                 row_str = row.astype(str).str.upper().tolist()
-                # We prioritize finding "ANNUAL" to ensure we get the right row
+                # Prioritize "ANNUAL" and "INSPECTION", exclude "1ST SCHEDULE" in row detection if possible
                 if any("ANNUAL" in x for x in row_str) and any("INSPECTION" in x for x in row_str):
                     header_row = i
                     break
@@ -38,7 +38,6 @@ if uploaded_file:
         # 2. Try Loading as Excel
         else:
             try:
-                # Detect Header
                 preview = pd.read_excel(uploaded_file, header=None, nrows=15)
                 header_row = 4  # Default guess
                 for i, row in preview.iterrows():
@@ -67,24 +66,20 @@ if uploaded_file:
     if df is not None:
         st.sidebar.success("File Loaded!")
 
-        # 1. MAP COLUMNS (UPDATED LOGIC)
+        # 1. MAP COLUMNS
         st.sidebar.header("1. Map Columns")
         cols = list(df.columns)
         
-        # New Helper: Find column but EXCLUDE specific terms (like "1st Schedule")
+        # Helper: Find column excluding specific terms
         def find_col(terms, exclude_terms=None):
             if exclude_terms is None: exclude_terms = []
             for i, c in enumerate(cols):
                 c_upper = str(c).upper()
-                # Skip if it contains an excluded term
-                if any(ex in c_upper for ex in exclude_terms):
-                    continue
-                # Check if it matches search terms
-                if any(t in c_upper for t in terms):
-                    return i
+                if any(ex in c_upper for ex in exclude_terms): continue
+                if any(t in c_upper for t in terms): return i
             return 0
 
-        # Selectors with strict exclusion for 1st Schedule
+        # Selectors
         c_date = st.sidebar.selectbox(
             "Annual Inspection Date", 
             cols, 
@@ -100,7 +95,7 @@ if uploaded_file:
         for c in [c_date, c_reply]:
             df[c] = pd.to_datetime(df[c], errors='coerce').dt.date
 
-        # --- GENERATE 'YES/NO' COLUMN ---
+        # Yes/No Logic
         def categorize_defect(val):
             s = str(val).upper()
             if pd.isna(val) or val == "" or s == 'NAN': return "Blank"
@@ -110,7 +105,7 @@ if uploaded_file:
 
         df['Defect Found?'] = df[c_status].apply(categorize_defect)
 
-        # Logic: Calculate Due Date
+        # Due Date Logic
         def get_due_date(row):
             start = row[c_date]
             stat = str(row[c_status]).upper()
@@ -119,7 +114,6 @@ if uploaded_file:
             if "MAJOR" in stat: return start + relativedelta(months=1)
             if "MINOR" in stat: return start + relativedelta(months=3)
             if "NOTICE" in stat: return start + relativedelta(weeks=2)
-            # Default to 1 year if No Defect or Unknown
             return start + relativedelta(years=1)
 
         df['Due Date'] = df.apply(get_due_date, axis=1)
@@ -129,12 +123,10 @@ if uploaded_file:
         st.sidebar.markdown("---")
         st.sidebar.header("2. Filters")
 
-        # A. Filter: Defect Yes/No
+        # Filters
         f_yn = st.sidebar.multiselect("Defect Found? (Yes/No)", options=["Yes", "No", "Blank", "Other"])
-        if f_yn:
-            df = df[df['Defect Found?'].isin(f_yn)]
+        if f_yn: df = df[df['Defect Found?'].isin(f_yn)]
 
-        # B. Filter: Specific Category (Major/Minor)
         status_types = ["Major", "Minor", "Notice", "No Defect"]
         f_cat = st.sidebar.multiselect("Inspection Category", options=status_types)
         if f_cat:
@@ -143,43 +135,50 @@ if uploaded_file:
                 mask = mask | df[c_status].astype(str).str.contains(cat, case=False, na=False)
             df = df[mask]
 
-        # C. Filter: Inspector
         f_insp = st.sidebar.multiselect("Inspector Name", options=df[c_insp].astype(str).unique())
-        if f_insp:
-            df = df[df[c_insp].astype(str).isin(f_insp)]
+        if f_insp: df = df[df[c_insp].astype(str).isin(f_insp)]
             
-        # D. Filter: Reply Date (Yes/No)
         f_reply = st.sidebar.radio("Reply Status:", ["All", "Replied", "Not Replied"])
-        if f_reply == "Replied":
-            df = df[df[c_reply].notna()]
-        elif f_reply == "Not Replied":
-            df = df[df[c_reply].isna()]
+        if f_reply == "Replied": df = df[df[c_reply].notna()]
+        elif f_reply == "Not Replied": df = df[df[c_reply].isna()]
 
-        # E. Filter: Buffer Time
         f_buffer = st.sidebar.select_slider("Deadline Buffer:", options=["All", "Overdue", "1 Month", "3 Months"])
-        
-        if f_buffer == "Overdue":
-            df = df[df['Days Left'] < 0]
-        elif f_buffer == "1 Month":
-            df = df[(df['Days Left'] >= 0) & (df['Days Left'] <= 30)]
-        elif f_buffer == "3 Months":
-            df = df[(df['Days Left'] >= 0) & (df['Days Left'] <= 90)]
+        if f_buffer == "Overdue": df = df[df['Days Left'] < 0]
+        elif f_buffer == "1 Month": df = df[(df['Days Left'] >= 0) & (df['Days Left'] <= 30)]
+        elif f_buffer == "3 Months": df = df[(df['Days Left'] >= 0) & (df['Days Left'] <= 90)]
 
         # 4. MAIN DISPLAY
-        # Metrics
         m1, m2, m3 = st.columns(3)
         m1.metric("Filtered Rows", len(df))
         m2.metric("Defects (Yes)", len(df[df['Defect Found?'] == "Yes"]))
         m3.metric("Urgent (Overdue)", len(df[df['Days Left'] < 0]), delta_color="inverse")
 
-        # Table with Color
+        # --- CRASH FIX: SAFE COLUMN SELECTION ---
+        # 1. Define columns to show
+        desired_cols = [c_date, c_status, 'Defect Found?', 'Due Date', 'Days Left', c_reply, c_insp]
+        
+        # 2. REMOVE DUPLICATES (This prevents the KeyError)
+        # We use dict.fromkeys to remove duplicates while keeping order
+        show_cols = list(dict.fromkeys(desired_cols))
+        
+        # 3. Style function
         def style_rows(row):
             d = row['Days Left']
             if pd.notnull(d) and d < 0: return ['background-color: #ffcccc'] * len(row) # Red
             if pd.notnull(d) and d < 30: return ['background-color: #ffffcc'] * len(row) # Yellow
             return [''] * len(row)
 
-        show_cols = [c_date, c_status, 'Defect Found?', 'Due Date', 'Days Left', c_reply, c_insp]
-        st.dataframe(df[show_cols].style.apply(style_rows, axis=1), use_container_width=True)
+        st.subheader("📋 Inspection Data")
+        
+        # 4. SAFE DISPLAY BLOCK
+        try:
+            st.dataframe(
+                df[show_cols].style.apply(style_rows, axis=1), 
+                use_container_width=True
+            )
+        except Exception as e:
+            # If styling fails (rare edge case), show plain data instead of crashing
+            st.warning("⚠️ Highlighting disabled due to column conflict, but here is your data:")
+            st.dataframe(df[show_cols], use_container_width=True)
 
         st.download_button("📥 Download Filtered Data", df.to_csv(index=False), "filtered_jkkp_data.csv", "text/csv")
